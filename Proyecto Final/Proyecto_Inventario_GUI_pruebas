@@ -1,0 +1,609 @@
+import tkinter as tk
+from tkinter import messagebox, ttk
+import json
+import os
+from datetime import datetime
+
+# =====================================================================
+# 1. MODELOS DE DATOS (NÚCLEO ESTRATÉGICO Y ADMINISTRATIVO)
+# =====================================================================
+
+class CostoFijo:
+    def __init__(self, descripcion, temporalidad, cantidad):
+        self.descripcion = descripcion
+        self.temporalidad = temporalidad  # "Mensual" o "Anual"
+        self.cantidad = cantidad
+
+    def obtener_mensualizado(self):
+        return self.cantidad if self.temporalidad == "Mensual" else self.cantidad / 12.0
+
+
+class Producto:
+    def __init__(self, id_p, nombre, tipo, unidad, stock_minimo=10, stock_maximo=100):
+        self.id = id_p
+        self.nombre = nombre
+        self.tipo = tipo  # "insumo", "comercializado", "fabricado"
+        self.unidad = unidad  # "pza", "grs", "ml"
+        self.stock_actual = 0.0
+        self.stock_minimo = stock_minimo
+        self.stock_maximo = stock_maximo
+        
+        # Estructuras de persistencia basadas en el flujo
+        self.receta = {}  # {id_insumo: cantidad_necesaria}
+        self.historial_compras = []  # Pila LIFO de lotes
+        self.historial_ventas = []  # [{fecha, cantidad, precio}]
+        self.competidores = []  # [{nombre, precio}]
+
+    def registrar_compra_lifo(self, cantidad, costo_unitario):
+        lote = {"cantidad": cantidad, "costo_unitario": costo_unitario, "fecha": datetime.now().strftime("%Y-%m-%d")}
+        self.historial_compras.append(lote)
+        self.stock_actual += cantidad
+
+    def obtener_costo_unitario_lifo(self):
+        if not self.historial_compras:
+            return 0.0
+        # Inspeccionar el último lote sin destruirlo (LIFO)
+        return self.historial_compras[-1]["costo_unitario"]
+
+    def calcular_costo_fabricacion(self, inventario_global):
+        if self.tipo != "fabricado":
+            return self.obtener_costo_unitario_lifo()
+        
+        costo_receta = 0.0
+        for id_insumo, cant_necesaria in self.receta.items():
+            insumo = inventario_global.productos.get(id_insumo)
+            if insumo:
+                costo_receta += insumo.obtener_costo_unitario_lifo() * cant_necesaria
+        return costo_receta
+
+    def evaluar_estado_stock(self):
+        if self.stock_actual <= self.stock_minimo:
+            return "⚠️ Alerta de Reestock"
+        elif self.stock_actual >= self.stock_maximo:
+            return "📦 Alerta de Sobrestock"
+        return "✅ Stock en orden"
+
+    def to_dict(self):
+        return {
+            "id": self.id, "nombre": self.nombre, "tipo": self.tipo, "unidad": self.unidad,
+            "stock_actual": self.stock_actual, "stock_minimo": self.stock_minimo, "stock_maximo": self.stock_maximo,
+            "receta": {str(k): v for k, v in self.receta.items()}, "historial_compras": self.historial_compras,
+            "historial_ventas": self.historial_ventas, "competidores": self.competidores
+        }
+
+    @staticmethod
+    def from_dict(d):
+        p = Producto(d["id"], d["nombre"], d["tipo"], d["unidad"], d["stock_minimo"], d["stock_maximo"])
+        p.stock_actual = d["stock_actual"]
+        p.receta = {int(k): v for k, v in d["receta"].items()}
+        p.historial_compras = d["historial_compras"]
+        p.historial_ventas = d["historial_ventas"]
+        p.competidores = d["competidores"]
+        return p
+
+
+class SistemaEmpresarial:
+    def __init__(self, archivo="erp_data.json"):
+        self.archivo = archivo
+        self.productos = {}
+        self.costos_fijos = []
+        self.cargar_datos()
+
+    def guardar_datos(self):
+        try:
+            data = {
+                "productos": {str(id_p): p.to_dict() for id_p, p in self.productos.items()},
+                "costos_fijos": [{"descripcion": cf.descripcion, "temporalidad": cf.temporalidad, "cantidad": cf.cantidad} for cf in self.costos_fijos]
+            }
+            with open(self.archivo, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error al guardar persistencia: {e}")
+
+    def cargar_datos(self):
+        if os.path.exists(self.archivo) and os.path.getsize(self.archivo) > 0:
+            try:
+                with open(self.archivo, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.productos = {int(id_p): Producto.from_dict(p_dict) for id_p, p_dict in data.get("productos", {}).items()}
+                    self.costos_fijos = [CostoFijo(cf["descripcion"], cf["temporalidad"], cf["cantidad"]) for cf in data.get("costos_fijos", [])]
+            except Exception as e:
+                print(f"Error al cargar datos: {e}")
+                self.productos = {}
+                self.costos_fijos = []
+
+
+# =====================================================================
+# 2. INTERFAZ GRÁFICA INTERACTIVA (UI CON ENFOQUE EN EL EMPRENDEDOR)
+# =====================================================================
+
+class AppERP:
+    def __init__(self, root):
+        self.sistema = SistemaEmpresarial()
+        self.root = root
+        self.root.title("Ecovistas Café - Panel de Control ERP")
+        # El formato correcto es "ANCHOxFALTO" con una 'x' minúscula común:
+        self.root.geometry("950x750")
+
+        # Encabezado unificado
+        header = tk.Frame(root, bg="#2c3e50", height=60)
+        header.pack(fill="x", side="top")
+        tk.Label(header, text="☕ Ecovistas Café — Sistema de Gestión Comercial e Inventarios LIFO", 
+                 font=("Arial", 14, "bold"), fg="white", bg="#2c3e50").pack(pady=15)
+
+        # Contenedor de Pestañas (Notebook)
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Inicializar Marcos de Roles basados en el Diagrama
+        self.tab_estructura = tk.Frame(self.notebook, bg="white")
+        self.tab_compras = tk.Frame(self.notebook, bg="white")
+        self.tab_ventas = tk.Frame(self.notebook, bg="white")
+        self.tab_estrategia = tk.Frame(self.notebook, bg="white")
+
+        self.notebook.add(self.tab_estructura, text="📦 1. Estructura y Costos Fijos (Estratega)")
+        self.notebook.add(self.tab_compras, text="🧾 2. Entradas y Almacén (Administrador)")
+        self.notebook.add(self.tab_ventas, text="🛒 3. Punto de Venta (Operador)")
+        self.notebook.add(self.tab_estrategia, text="📊 4. Tablero Estratégico (Estratega)")
+
+        # Construcción de Vistas
+        self.crear_tab_estructura()
+        self.crear_tab_compras()
+        self.crear_tab_ventas()
+        self.crear_tab_estrategia()
+
+        # Monitor de Consola de Inventario unificado al fondo de la app
+        lbl_mon = tk.LabelFrame(root, text=" 📦 Monitor de Almacén en Tiempo Real (Persistencia Activa) ", font=("Arial", 10, "bold"), bg="#f8f9fa")
+        lbl_mon.pack(fill="x", side="bottom", padx=10, pady=10)
+        self.txt_monitor = tk.Text(lbl_mon, height=6, font=("Consolas", 10), bg="#34495e", fg="#ecf0f1")
+        self.txt_monitor.pack(fill="x", expand=True, padx=5, pady=5)
+
+        self.actualizar_comboboxes()
+        self.refrescar_monitor_almacen()
+
+    # =====================================================================
+    # PESTAÑA 1: ESTRUCTURA Y GENERADOR DE PRODUCTOS
+    # =====================================================================
+    def crear_tab_estructura(self):
+        # Subframe 1: Catálogo de Productos
+        f_prod = tk.LabelFrame(self.tab_estructura, text=" Generador de Productos ", font=("Arial", 10, "bold"), bg="white", padx=10, pady=10)
+        f_prod.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+
+        tk.Label(f_prod, text="ID Numérico:", bg="white").grid(row=0, column=0, sticky="w")
+        self.ent_id = tk.Entry(f_prod, width=10)
+        self.ent_id.grid(row=0, column=1, pady=3)
+
+        tk.Label(f_prod, text="Nombre Artículo:", bg="white").grid(row=1, column=0, sticky="w")
+        self.ent_nombre = tk.Entry(f_prod, width=20)
+        self.ent_nombre.grid(row=1, column=1, pady=3)
+
+        tk.Label(f_prod, text="Clasificación:", bg="white").grid(row=2, column=0, sticky="w")
+        self.cmb_tipo = ttk.Combobox(f_prod, values=["insumo", "comercializado", "fabricado"], state="readonly", width=18)
+        self.cmb_tipo.set("comercializado")
+        self.cmb_tipo.grid(row=2, column=1, pady=3)
+
+        tk.Label(f_prod, text="Unidad Medida:", bg="white").grid(row=3, column=0, sticky="w")
+        self.cmb_unidad = ttk.Combobox(f_prod, values=["pza", "grs", "ml"], state="readonly", width=18)
+        self.cmb_unidad.set("pza")
+        self.cmb_unidad.grid(row=3, column=1, pady=3)
+
+        tk.Label(f_prod, text="Stock Mínimo:", bg="white").grid(row=4, column=0, sticky="w")
+        self.ent_min = tk.Entry(f_prod, width=10)
+        self.ent_min.insert(0, "10")
+        self.ent_min.grid(row=4, column=1, pady=3)
+
+        tk.Label(f_prod, text="Stock Máximo:", bg="white").grid(row=5, column=0, sticky="w")
+        self.ent_max = tk.Entry(f_prod, width=10)
+        self.ent_max.insert(0, "100")
+        self.ent_max.grid(row=5, column=1, pady=3)
+
+        tk.Button(f_prod, text="💾 Registrar en Catálogo", bg="#2980b9", fg="white", font=("Arial", 9, "bold"),
+                  command=self.ui_registrar_producto).grid(row=6, column=0, columnspan=2, pady=10)
+
+        # Subframe 2: Configuración de Recetas (Para productos Fabricados)
+        f_rec = tk.LabelFrame(self.tab_estructura, text=" Vinculación de Recetas ", font=("Arial", 10, "bold"), bg="white", padx=10, pady=10)
+        f_rec.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+
+        tk.Label(f_rec, text="Producto Final (Fabricado):", bg="white").grid(row=0, column=0, sticky="w")
+        self.cmb_rec_padre = ttk.Combobox(f_rec, state="readonly", width=25)
+        self.cmb_rec_padre.grid(row=0, column=1, pady=5)
+
+        tk.Label(f_rec, text="Insumo Necesario:", bg="white").grid(row=1, column=0, sticky="w")
+        self.cmb_rec_insumo = ttk.Combobox(f_rec, state="readonly", width=25)
+        self.cmb_rec_insumo.grid(row=1, column=1, pady=5)
+
+        tk.Label(f_rec, text="Cantidad Neta Requerida:", bg="white").grid(row=2, column=0, sticky="w")
+        self.ent_rec_cant = tk.Entry(f_rec, width=12)
+        self.ent_rec_cant.grid(row=2, column=1, pady=5)
+
+        tk.Button(f_rec, text="🔗 Ligar Insumo a Receta", bg="#8e44ad", fg="white", font=("Arial", 9, "bold"),
+                  command=self.ui_ligar_receta).grid(row=3, column=0, columnspan=2, pady=10)
+
+        # Subframe 3: Costos Fijos Organizacionales
+        f_cf = tk.LabelFrame(self.tab_estructura, text=" Gestión de Costos Fijos Corporativos ", font=("Arial", 10, "bold"), bg="white", padx=10, pady=10)
+        f_cf.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+
+        tk.Label(f_cf, text="Descripción del Gasto:", bg="white").grid(row=0, column=0, padx=5)
+        self.ent_cf_desc = tk.Entry(f_cf, width=25)
+        self.ent_cf_desc.grid(row=0, column=1, padx=5)
+
+        tk.Label(f_cf, text="Temporalidad:", bg="white").grid(row=0, column=2, padx=5)
+        self.cmb_cf_temp = ttk.Combobox(f_cf, values=["Mensual", "Anual"], state="readonly", width=12)
+        self.cmb_cf_temp.set("Mensual")
+        self.cmb_cf_temp.grid(row=0, column=3, padx=5)
+
+        tk.Label(f_cf, text="Monto ($):", bg="white").grid(row=0, column=4, padx=5)
+        self.ent_cf_monto = tk.Entry(f_cf, width=12)
+        self.ent_cf_monto.grid(row=0, column=5, padx=5)
+
+        tk.Button(f_cf, text="➕ Agregar Costo", bg="#27ae60", fg="white", font=("Arial", 9, "bold"),
+                  command=self.ui_agregar_costo_fijo).grid(row=0, column=6, padx=15)
+
+    # =====================================================================
+    # PESTAÑA 2: ENTRADAS, COMPRAS Y LOGÍSTICA (ADMINISTRADOR)
+    # =====================================================================
+    def crear_tab_compras(self):
+        f_comp = tk.LabelFrame(self.tab_compras, text=" Captura de Facturas de Adquisición (Abastecimiento) ", font=("Arial", 10, "bold"), bg="white", padx=15, pady=15)
+        f_comp.pack(fill="both", expand=True, padx=15, pady=15)
+
+        tk.Label(f_comp, text="Seleccione Producto a Surtir:", font=("Arial", 10, "bold"), bg="white").grid(row=0, column=0, sticky="w", pady=5)
+        self.cmb_compras_prod = ttk.Combobox(f_comp, state="readonly", width=40)
+        self.cmb_compras_prod.grid(row=0, column=1, columnspan=2, pady=5, sticky="w")
+
+        # Datos del Proveedor (Según tu Flujo)
+        tk.Label(f_comp, text="Nombre Proveedor:", bg="white").grid(row=1, column=0, sticky="w", pady=3)
+        self.ent_prov_nom = tk.Entry(f_comp, width=25)
+        self.ent_prov_nom.grid(row=1, column=1, pady=3, sticky="w")
+
+        tk.Label(f_comp, text="Ubicación Proveedor:", bg="white").grid(row=1, column=2, sticky="w", pady=3)
+        self.ent_prov_ubi = tk.Entry(f_comp, width=25)
+        self.ent_prov_ubi.grid(row=1, column=3, pady=3, sticky="w")
+
+        # Variables Financieras de Compra
+        tk.Label(f_comp, text="Cantidad Adquirida (Unidades Netas):", bg="white").grid(row=2, column=0, sticky="w", pady=3)
+        self.ent_comp_cant = tk.Entry(f_comp, width=15)
+        self.ent_comp_cant.grid(row=2, column=1, pady=3, sticky="w")
+
+        tk.Label(f_comp, text="Costo Factura Subtotal ($):", bg="white").grid(row=3, column=0, sticky="w", pady=3)
+        self.ent_comp_sub = tk.Entry(f_comp, width=15)
+        self.ent_comp_sub.grid(row=3, column=1, pady=3, sticky="w")
+
+        tk.Label(f_comp, text="Costo de Logística / Flete ($):", bg="white").grid(row=4, column=0, sticky="w", pady=3)
+        self.ent_comp_log = tk.Entry(f_comp, width=15)
+        self.ent_comp_log.grid(row=4, column=1, pady=3, sticky="w")
+
+        tk.Label(f_comp, text="Modalidad Comercial:", bg="white").grid(row=5, column=0, sticky="w", pady=3)
+        self.cmb_modalidad = ttk.Combobox(f_comp, values=["Mayoreo", "Menudeo"], state="readonly", width=14)
+        self.cmb_modalidad.set("Mayoreo")
+        self.cmb_modalidad.grid(row=5, column=1, pady=3, sticky="w")
+
+        tk.Button(f_comp, text="🧾 Calcular y Cargar Costo Unitario LIFO", bg="#e67e22", fg="white", font=("Arial", 10, "bold"),
+                  height=2, command=self.ui_procesar_abastecimiento).grid(row=6, column=0, columnspan=4, pady=20)
+
+    # =====================================================================
+    # PESTAÑA 3: PUNTO DE VENTA (OPERADOR)
+    # =====================================================================
+    def crear_tab_ventas(self):
+        f_vent = tk.LabelFrame(self.tab_ventas, text=" Registro de Ventas Directas ", font=("Arial", 10, "bold"), bg="white", padx=15, pady=15)
+        f_vent.pack(fill="both", expand=True, padx=15, pady=15)
+
+        tk.Label(f_vent, text="Seleccione Producto Vendido:", font=("Arial", 10, "bold"), bg="white").grid(row=0, column=0, sticky="w", pady=8)
+        self.cmb_ventas_prod = ttk.Combobox(f_vent, state="readonly", width=40)
+        self.cmb_ventas_prod.grid(row=0, column=1, pady=8, sticky="w")
+
+        tk.Label(f_vent, text="Cantidad de Salida:", bg="white").grid(row=1, column=0, sticky="w", pady=5)
+        self.ent_vent_cant = tk.Entry(f_vent, width=15)
+        self.ent_vent_cant.grid(row=1, column=1, pady=5, sticky="w")
+
+        tk.Label(f_vent, text="Precio de Venta Cobrado ($):", bg="white").grid(row=2, column=0, sticky="w", pady=5)
+        self.ent_vent_precio = tk.Entry(f_vent, width=15)
+        self.ent_vent_precio.grid(row=2, column=1, pady=5, sticky="w")
+
+        tk.Button(f_vent, text="🛒 Procesar Despacho de Inventario", bg="#2ecc71", fg="white", font=("Arial", 10, "bold"),
+                  height=2, command=self.ui_procesar_venta).grid(row=3, column=0, columnspan=2, pady=20)
+
+    # =====================================================================
+    # PESTAÑA 4: MÓDULO FINANCIERO Y ESTRATEGIA (ESTRATEGA)
+    # =====================================================================
+    def crear_tab_estrategia(self):
+        # Lado Izquierdo: Entrada de Benchmarking
+        f_bench = tk.LabelFrame(self.tab_estrategia, text=" Benchmarking Competitivo ", font=("Arial", 10, "bold"), bg="white", padx=10, pady=10)
+        f_bench.place(x=15, y=15, width=420, height=220)
+
+        tk.Label(f_bench, text="Seleccionar Producto:", bg="white").grid(row=0, column=0, sticky="w")
+        self.cmb_est_prod = ttk.Combobox(f_bench, state="readonly", width=22)
+        self.cmb_est_prod.grid(row=0, column=1, pady=4)
+
+        tk.Label(f_bench, text="Nombre Competidor:", bg="white").grid(row=1, column=0, sticky="w")
+        self.ent_comp_name = tk.Entry(f_bench, width=20)
+        self.ent_comp_name.grid(row=1, column=1, pady=4)
+
+        tk.Label(f_bench, text="Precio Observado ($):", bg="white").grid(row=2, column=0, sticky="w")
+        self.ent_comp_pmercad = tk.Entry(f_bench, width=12)
+        self.ent_comp_pmercad.grid(row=2, column=1, pady=4)
+
+        tk.Button(f_bench, text="🎯 Registrar Competidor", bg="#34495e", fg="white", command=self.ui_registrar_competencia).grid(row=3, column=0, columnspan=2, pady=8)
+
+        # Lado Derecho: Simulación Financiera
+        f_sim = tk.LabelFrame(self.tab_estrategia, text=" Simulación de Margen de Utilidad ", font=("Arial", 10, "bold"), bg="white", padx=10, pady=10)
+        f_sim.place(x=455, y=15, width=450, height=220)
+
+        tk.Label(f_sim, text="Margen Deseado Base (ej: 0.60):", bg="white").grid(row=0, column=0, sticky="w")
+        self.ent_m_base = tk.Entry(f_sim, width=10)
+        self.ent_m_base.insert(0, "0.60")
+        self.ent_m_base.grid(row=0, column=1, pady=5)
+
+        tk.Label(f_sim, text="Margen Promocional (ej: 0.40):", bg="white").grid(row=1, column=0, sticky="w")
+        self.ent_m_promo = tk.Entry(f_sim, width=10)
+        self.ent_m_promo.insert(0, "0.40")
+        self.ent_m_promo.grid(row=1, column=1, pady=5)
+
+        tk.Button(f_sim, text="📊 Correr Modelación Financiera y Punto de Equilibrio", bg="#16a085", fg="white", font=("Arial", 9, "bold"),
+                  command=self.ui_calcular_estrategia_completa).place(x=20, y=110, width=380, height=40)
+
+        # Zona Baja: Reporte Ejecutivo Estratégico
+        f_rep = tk.LabelFrame(self.tab_estrategia, text=" 📜 Reporte de Diagnóstico Financiero y Salud Operativa ", font=("Arial", 10, "bold"), bg="white", padx=10, pady=10)
+        f_rep.place(x=15, y=250, width=890, height=300)
+
+        self.txt_reporte = tk.Text(f_rep, font=("Courier New", 10), bg="#fcfcfc")
+        self.txt_reporte.pack(fill="both", expand=True)
+
+    # =====================================================================
+    # LÓGICA DE CONTROLADORES E INTERACCIÓN INTUITIVA
+    # =====================================================================
+
+    def actualizar_comboboxes(self):
+        """Mantiene sincronizadas las listas desplegables evitando errores de captura a ciegas."""
+        lista_completa = [f"{p.id} - {p.nombre} ({p.tipo})" for p in self.sistema.productos.values()]
+        lista_insumos = [f"{p.id} - {p.nombre}" for p in self.sistema.productos.values() if p.tipo == "insumo"]
+        lista_fabricados = [f"{p.id} - {p.nombre}" for p in self.sistema.productos.values() if p.tipo == "fabricado"]
+
+        self.cmb_compras_prod["values"] = lista_completa
+        self.cmb_ventas_prod["values"] = lista_completa
+        self.cmb_est_prod["values"] = lista_completa
+        self.cmb_rec_padre["values"] = lista_fabricados
+        self.cmb_rec_insumo["values"] = lista_insumos
+
+    def refrescar_monitor_almacen(self):
+        self.txt_monitor.delete("1.0", tk.END)
+        self.txt_monitor.insert(tk.END, f"{'ID':<6} | {'PRODUCTO':<25} | {'TIPO':<15} | {'STOCK ACTUAL':<15} | {'COSTO LIFO':<12} | {'ESTADO':<20}\n")
+        self.txt_monitor.insert(tk.END, "-" * 100 + "\n")
+        
+        for p in self.sistema.productos.values():
+            costo = p.calcular_costo_fabricacion(self.sistema) if p.tipo == "fabricado" else p.obtener_costo_unitario_lifo()
+            estado = p.evaluar_estado_stock()
+            st_str = f"{p.stock_actual:.1f} {p.unidad}"
+            self.txt_monitor.insert(tk.END, f"{p.id:<6} | {p.nombre:<25} | {p.tipo:<15} | {st_str:<15} | ${costo:<11.2f} | {estado:<20}\n")
+
+    def ui_registrar_producto(self):
+        try:
+            id_p = int(self.ent_id.get())
+            nombre = self.ent_nombre.get().strip()
+            tipo = self.cmb_tipo.get()
+            unidad = self.cmb_unidad.get()
+            s_min = float(self.ent_min.get())
+            s_max = float(self.ent_max.get())
+
+            if not nombre:
+                messagebox.showerror("Error", "Debe asignar un nombre válido.")
+                return
+
+            if id_p in self.sistema.productos:
+                messagebox.showerror("Error", "Este ID de artículo ya existe en el catálogo corporativo.")
+                return
+
+            nuevo = Producto(id_p, nombre, tipo, unidad, s_min, s_max)
+            self.sistema.productos[id_p] = nuevo
+            self.sistema.guardar_datos()
+            messagebox.showinfo("Éxito", f"Producto '{nombre}' indexado con éxito.")
+            
+            self.actualizar_comboboxes()
+            self.refrescar_monitor_almacen()
+        except ValueError:
+            messagebox.showerror("Error", "Los campos ID, Stock Mínimo y Máximo deben ser numéricos.")
+
+    def ui_ligar_receta(self):
+        try:
+            if not self.cmb_rec_padre.get() or not self.cmb_rec_insumo.get():
+                messagebox.showerror("Error", "Seleccione ambos productos de las listas desplegables.")
+                return
+            
+            id_padre = int(self.cmb_rec_padre.get().split(" - ")[0])
+            id_insumo = int(self.cmb_rec_insumo.get().split(" - ")[0])
+            cantidad = float(self.ent_rec_cant.get())
+
+            prod_padre = self.sistema.productos[id_padre]
+            prod_padre.receta[id_insumo] = cantidad
+            self.sistema.guardar_datos()
+            
+            messagebox.showinfo("Receta Enlazada", f"Ligados {cantidad} del insumo al producto final con éxito.")
+            self.refrescar_monitor_almacen()
+        except ValueError:
+            messagebox.showerror("Error", "La cantidad requerida debe ser un dato numérico.")
+
+    def ui_agregar_costo_fijo(self):
+        try:
+            desc = self.ent_cf_desc.get().strip()
+            temp = self.cmb_cf_temp.get()
+            monto = float(self.ent_cf_monto.get())
+
+            if not desc:
+                messagebox.showerror("Error", "Falta la descripción del costo fijo.")
+                return
+
+            nuevo_cf = CostoFijo(desc, temp, monto)
+            self.sistema.costos_fijos.append(nuevo_cf)
+            self.sistema.guardar_datos()
+            messagebox.showinfo("Costo Guardado", f"Costo fijo '{desc}' registrado en el presupuesto.")
+        except ValueError:
+            messagebox.showerror("Error", "El monto del costo fijo debe ser numérico.")
+
+    def ui_procesar_abastecimiento(self):
+        try:
+            if not self.cmb_compras_prod.get():
+                messagebox.showerror("Error", "Seleccione un producto existente de la lista.")
+                return
+
+            id_p = int(self.cmb_compras_prod.get().split(" - ")[0])
+            cantidad = float(self.ent_comp_cant.get())
+            subtotal = float(self.ent_comp_sub.get())
+            logistica = float(self.ent_comp_log.get())
+            modalidad = self.cmb_modalidad.get()
+
+            # Lógica exacta del Flujo: Costo real LIFO incluye Logística
+            costo_total_adquisicion = subtotal + logistica
+            costo_unitario_neto = costo_total_adquisicion / cantidad
+
+            producto = self.sistema.productos[id_p]
+            producto.registrar_compra_lifo(cantidad, costo_unitario_neto)
+            
+            estado_almacen = producto.evaluar_estado_stock()
+            self.sistema.guardar_datos()
+            
+            msg = f"Surtido LIFO completado.\nCosto Unitario Calculado: ${costo_unitario_neto:.2f}\nEstado: {estado_almacen}"
+            messagebox.showinfo("Almacén Actualizado", msg)
+            self.refrescar_monitor_almacen()
+        except ValueError:
+            messagebox.showerror("Error", "Valide que cantidad, subtotal y fletes sean numéricos.")
+
+    def ui_procesar_venta(self):
+        try:
+            if not self.cmb_ventas_prod.get():
+                messagebox.showerror("Error", "Seleccione el producto de la lista.")
+                return
+
+            id_p = int(self.cmb_ventas_prod.get().split(" - ")[0])
+            cantidad = float(self.ent_vent_cant.get())
+            precio = float(self.ent_vent_precio.get())
+
+            producto = self.sistema.productos[id_p]
+
+            # Si es un artículo fabricado, validar primero la disponibilidad de sus recetas
+            if producto.tipo == "fabricado":
+                for id_insumo, cant_necesaria in producto.receta.items():
+                    insumo = self.sistema.productos.get(id_insumo)
+                    if not insumo or insumo.stock_actual < (cant_necesaria * cantidad):
+                        messagebox.showerror("Falta de Insumos", f"Operación Rebotada. Stock insuficiente del insumo: '{insumo.nombre if insumo else id_insumo}'")
+                        return
+                
+                # Descontar insumos proporcionalmente
+                for id_insumo, cant_necesaria in producto.receta.items():
+                    self.sistema.productos[id_insumo].stock_actual -= (cant_necesaria * cantidad)
+                
+                producto.stock_actual += cantidad  # Simulación de ensamble inmediato
+
+            if producto.stock_actual < cantidad:
+                messagebox.showerror("Stock Insuficiente", f"No hay suficientes unidades físicas de '{producto.nombre}' en el inventario.")
+                return
+
+            # Registrar Salida
+            producto.stock_actual -= cantidad
+            producto.historial_ventas.append({
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "cantidad": cantidad,
+                "precio": precio
+            })
+            self.sistema.guardar_datos()
+            messagebox.showinfo("Venta Éxitosa", f"Venta procesada. Quedan {producto.stock_actual} {producto.unidad} en almacén.")
+            self.refrescar_monitor_almacen()
+        except ValueError:
+            messagebox.showerror("Error", "Valide los campos numéricos en la venta.")
+
+    def ui_registrar_competencia(self):
+        if not self.cmb_est_prod.get():
+            messagebox.showerror("Error", "Seleccione un producto para benchmarking.")
+            return
+        try:
+            id_p = int(self.cmb_est_prod.get().split(" - ")[0])
+            nombre_c = self.ent_comp_name.get().strip()
+            precio_c = float(self.ent_comp_pmercad.get())
+
+            if not nombre_c:
+                messagebox.showerror("Error", "Indique el nombre del competidor.")
+                return
+
+            self.sistema.productos[id_p].competidores.append({"competidor": nombre_c, "precio": precio_c})
+            self.sistema.guardar_datos()
+            messagebox.showinfo("Benchmarking", f"Precio de competencia guardado para '{self.sistema.productos[id_p].nombre}'.")
+        except ValueError:
+            messagebox.showerror("Error", "El precio de mercado debe ser un número.")
+
+    def ui_calcular_estrategia_completa(self):
+        if not self.cmb_est_prod.get():
+            messagebox.showerror("Error", "Seleccione un producto para correr los modelos.")
+            return
+        
+        id_p = int(self.cmb_est_prod.get().split(" - ")[0])
+        producto = self.sistema.productos[id_p]
+
+        try:
+            m_base = float(self.ent_m_base.get())
+            m_promo = float(self.ent_m_promo.get())
+        except ValueError:
+            messagebox.showerror("Error", "Los márgenes deben expresarse en decimales (ej: 0.60).")
+            return
+
+        # 1. Obtener Costo Base (LIFO o Receta)
+        costo_base = producto.calcular_costo_fabricacion(self.sistema) if producto.tipo == "fabricado" else producto.obtener_costo_unitario_lifo()
+        
+        if costo_base == 0:
+            messagebox.showerror("Inconsistencia Financiera", "No se puede calcular estrategias porque el producto no tiene un historial de costos real registrado.")
+            return
+
+        # 2. Modelación de Precios de tu Flujo (Margen 1, Margen 2, Margen 3)
+        precio_deseado = costo_base / (1 - m_base)
+        precio_estrategico = costo_base / (1 - m_promo)
+        
+        precios_mercado = [c["precio"] for c in producto.competidores]
+        precio_competitivo = sum(precios_mercado) / len(precios_mercado) if precios_mercado else precio_deseado
+
+        # 3. Sumar Costos Fijos Mensualizados globales
+        carga_fija_mensual = sum(cf.obtener_mensualizado() for cf in self.sistema.costos_fijos)
+
+        # 4. Simulación del Punto de Equilibrio de este producto específico
+        # Unidades necesarias = Costos Fijos / Margen de contribución en Pesos (usando el Precio Deseado)
+        margen_contribucion_pesos = precio_deseado - costo_base
+        punto_equilibrio_unidades = carga_fija_mensual / margen_contribucion_pesos if margen_contribucion_pesos > 0 else 0
+
+        # 5. Evaluación de la Salud Financiera del Operador (Ventas reales acumuladas)
+        total_ingresos_reales = sum(v["cantidad"] * v["precio"] for v in producto.historial_ventas)
+        total_unidades_vendidas = sum(v["cantidad"] for v in producto.historial_ventas)
+        costo_variable_total = total_unidades_vendidas * costo_base
+        utilidad_bruta_real = total_ingresos_reales - costo_variable_total
+
+        # Diagnóstico de salud según tus etiquetas exactas
+        if total_ingresos_reales == 0:
+            salud_financiera = "⚪ Alerta: Sin historial de ventas capturado en este ciclo operativo."
+        elif utilidad_bruta_real > carga_fija_mensual:
+            salud_financiera = "🟢 ESTADO: ¡Se están generando ganancias de capital corporativo!"
+        elif abs(utilidad_bruta_real - carga_fija_mensual) < (carga_fija_mensual * 0.15) or (total_unidades_vendidas >= punto_equilibrio_unidades * 0.9):
+            salud_financiera = "🟡 ESTADO: Se cubren únicamente las operaciones básicas (Zona de Equilibrio)."
+        else:
+            salud_financiera = "🔴 ALERTA OPERATIVA: Operando debajo de las capacidades financieras mínimas del negocio."
+
+        # Desplegar en el Reporte Corporativo
+        self.txt_reporte.delete("1.0", tk.END)
+        self.txt_reporte.insert(tk.END, f"========================================================================\n")
+        self.txt_reporte.insert(tk.END, f"           📋 INFORME FINANCIERO ESTRATÉGICO: {producto.nombre.upper()}\n")
+        self.txt_reporte.insert(tk.END, f"========================================================================\n\n")
+        self.txt_reporte.insert(tk.END, f"• Costo Base Unitario LIFO / Estructura Insumos: ${costo_base:.2f}\n")
+        self.txt_reporte.insert(tk.END, f"• Costos Fijos Totales de la Empresa (Mensualizados): ${carga_fija_mensual:.2f}\n\n")
+        
+        self.txt_reporte.insert(tk.END, f"📈 MODELACIÓN DE CANDADOS DE PRECIOS SUGERIDOS:\n")
+        self.txt_reporte.insert(tk.END, f"  └─► [PRECIO DESEADO]      (Margen Ganancia Base {m_base*100}%): ${precio_deseado:.2f}\n")
+        self.txt_reporte.insert(tk.END, f"  └─► [PRECIO COMPETITIVO]  (Promedio Benchmarking Mercado): ${precio_competitivo:.2f}\n")
+        self.txt_reporte.insert(tk.END, f"  └─► [PRECIO ESTRATÉGICO]  (Margen Promocional Piso {m_promo*100}%): ${precio_estrategico:.2f}\n\n")
+        
+        self.txt_reporte.insert(tk.END, f"🎯 ANÁLISIS DE UMBRAL OPERATIVO:\n")
+        self.txt_reporte.insert(tk.END, f"  └─► PUNTO DE EQUILIBRIO: Se deben vender {punto_equilibrio_unidades:.1f} unidades mensuales para amortizar la operación.\n")
+        self.txt_reporte.insert(tk.END, f"  └─► Unidades Reales Vendidas en este Ciclo: {total_unidades_vendidas:.1f} pzas.\n\n")
+        
+        self.txt_reporte.insert(tk.END, f"------------------------------------------------------------------------\n")
+        self.txt_reporte.insert(tk.END, f" STATUS DE VIABILIDAD ECONÓMICA:\n {salud_financiera}\n")
+        self.txt_reporte.insert(tk.END, f"------------------------------------------------------------------------\n")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AppERP(root)
+    root.mainloop()

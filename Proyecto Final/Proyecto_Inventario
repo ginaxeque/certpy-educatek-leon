@@ -1,0 +1,404 @@
+import json
+import os
+
+
+#1: LOGÍSTICA Y MODELO DE NEGOCIO (POO)
+
+class Producto:
+    def __init__(self, id_producto, nombre, tipo="Fabricado"):
+        # JUSTIFICACIÓN RÚBRICA: Control de datos mediante validación de caracteres permitidos.
+        # Evita que el usuario ingrese IDs que rompan la estructura de almacenamiento.
+        if not all(c.isalnum() or c in '-_' for c in id_producto):
+            raise ValueError("El ID solo permite números, letras, guiones (-) y guiones bajos (_).")
+            
+        self.id = id_producto
+        self.nombre = nombre
+        self.tipo = tipo  # Distingue entre "Fabricado" y "Comercializado"
+        
+        # JUSTIFICACIÓN TÉCNICA: Estructuras dinámicas de datos para simular el inventario.
+        # Se usa una lista donde cada entrada se agrega al final con .append() para aplicar LIFO.
+        self.historial_compras = []  
+        self.margen_deseado = {"menudeo": 0.0, "mayoreo": 0.0}
+        self.promociones_cupones = 0.0
+        self.datos_competencia = {"nombre": "", "ubicacion": "", "fecha": "", "precio": 0.0}
+        self.costos_fijos = []  # Almacena los costos operativos mensuales prorrateados.
+
+    def registrar_compra(self, costo_insumo, cantidad, costo_logistica):
+        """
+        JUSTIFICACIÓN DEL FLUJO: Módulo Administrador - Entradas.
+        Registra un lote en el historial. Al usar .append(), el lote más reciente 
+        queda al final de la lista, cumpliendo el principio de pila para LIFO.
+        """
+        movimiento = {
+            "costo_insumo": costo_insumo,
+            "cantidad": cantidad,
+            "logistica": costo_logistica
+        }
+        self.historial_compras.append(movimiento)
+
+    @property
+    def stock_actual(self):
+        """
+        JUSTIFICACIÓN TÉCNICA: Uso del decorador @property para crear un atributo dinámico.
+        Calcula el stock disponible 'al momento' sumando las cantidades del historial.
+        """
+        return sum(item['cantidad'] for item in self.historial_compras)
+
+    def calcular_costo_unitario_lifo(self):
+        """
+        JUSTIFICACIÓN ECONÓMICA: Valuación por Últimas Entradas, Primeras Salidas (LIFO).
+        En contextos de volatilidad de proveedores, evalúa el costo basándose en el último lote 
+        añadido (índice [-1]). Integra Costo + Logística según el diagrama de flujo.
+        """
+        if not self.historial_compras:
+            return 0.0
+        
+        # LIFO: Leemos el último elemento ingresado en la lista sin destruirlo prematuramente
+        ultima_entrada = self.historial_compras[-1]
+        return ultima_entrada["costo_insumo"] + ultima_entrada["logistica"]
+
+    def obtener_alerta_stock(self, limite_min=15, limite_max=80):
+        """
+        JUSTIFICACIÓN RÚBRICA: Control de datos y lógica condicional anidada.
+        Evalúa el stock actual frente a los parámetros operativos para arrojar alertas de control.
+        """
+        stock = self.stock_actual
+        if stock > limite_max:
+            return "Alerta de Sobrestock"
+        elif stock < limite_min:
+            return "Alerta de Reestock"
+        return "Stock en orden"
+
+    def capturar_datos_margen(self, menudeo, mayoreo, promociones=0.0):
+        """Módulo Estratega: Establece los objetivos de ganancia comercial."""
+        self.margen_deseado["menudeo"] = menudeo
+        self.margen_deseado["mayoreo"] = mayoreo
+        self.promociones_cupones = promociones
+
+    def capturar_datos_competencia(self, nombre, ubicacion, fecha, precio):
+        """Módulo Estratega - Benchmarking: Registra precios del entorno competitivo."""
+        self.datos_competencia = {
+            "nombre": nombre, "ubicacion": ubicacion, "fecha": fecha, "precio": precio
+        }
+
+    def capturar_costo_fijo(self, descripcion, temporalidad, cantidad):
+        """
+        JUSTIFICACIÓN ECONÓMICA: Prorrateo de Costos Operativos.
+        Si el costo es anual (ej. seguros, licencias), lo divide entre 12 para estandarizar 
+        la carga fija mensual y no distorsionar el cálculo del punto de equilibrio.
+        """
+        if temporalidad.lower() == "anual":
+            cantidad_mensual = cantidad / 12
+        else:
+            cantidad_mensual = cantidad
+            
+        self.costos_fijos.append({
+            "descripcion": descripcion,
+            "temporalidad": temporalidad,
+            "cantidad_mensual": cantidad_mensual
+        })
+
+    def calcular_precios_estrategicos(self):
+        """
+        JUSTIFICACIÓN ECONÓMICA: Simulación de Escenarios Financieros y Punto de Equilibrio.
+        Determina múltiples precios competitivos y calcula el volumen mensual crítico de unidades 
+        necesarias para absorber los costos fijos totales del negocio utilizando el margen de contribución.
+        """
+        costo_base = self.calcular_costo_unitario_lifo()
+        
+        # Escenario 1: Margen de utilidad neto sobre costo base
+        precio_margen = costo_base * (1 + self.margen_deseado["menudeo"])
+        # Escenario 2: Paridad con el mercado (Benchmarking)
+        precio_competitivo = self.datos_competencia["precio"]
+        # Escenario 3: Precio de penetración o estrategia con descuentos aplicados
+        precio_estratego = precio_margen - self.promociones_cupones
+        
+        # Análisis de Punto de Equilibrio Absoluto
+        total_cf_mensual = sum(cf["cantidad_mensual"] for cf in self.costos_fijos)
+        margen_contribucion = precio_margen - costo_base
+        
+        # Evita errores lógicos de división entre cero si el producto no genera margen positivo
+        punto_equilibrio = total_cf_mensual / margen_contribucion if margen_contribucion > 0 else float('inf')
+            
+        return {
+            "precio_margen": precio_margen,
+            "precio_competitivo": precio_competitivo,
+            "precio_estrategico": precio_estratego,
+            "punto_equilibrio_unidades": punto_equilibrio
+        }
+
+    def registrar_venta(self, cantidad_venta, precio_venta):
+        """
+        JUSTIFICACIÓN TÉCNICA Y ECONÓMICA: Algoritmo de Descarga de Inventario LIFO Real.
+        Modifica la persistencia consumiendo unidades desde el final de la lista (lotes más recientes).
+        Si un lote se agota, se remueve con .pop() y continúa con el anterior. Al final, evalúa si 
+        la transacción genera utilidades netas o si opera bajo pérdidas.
+        """
+        if cantidad_venta > self.stock_actual:
+            raise ValueError("Operación rechazada: Stock insuficiente en inventario.")
+            
+        costo_base = self.calcular_costo_unitario_lifo()
+        unidades_a_descontar = cantidad_venta
+        
+        # Implementación del ciclo LIFO para alterar las estructuras de stock
+        while unidades_a_descontar > 0 and self.historial_compras:
+            ultimo_lote = self.historial_compras[-1]
+            if ultimo_lote["cantidad"] <= unidades_a_descontar:
+                unidades_a_descontar -= ultimo_lote["cantidad"]
+                self.historial_compras.pop()  # Remueve el lote del historial ya que quedó en cero.
+            else:
+                ultimo_lote["cantidad"] -= unidades_a_descontar
+                unidades_a_descontar = 0
+                
+        # Evaluación financiera inmediata del ticket de venta
+        ingreso_total = cantidad_venta * precio_venta
+        costo_total_vendido = cantidad_venta * costo_base
+        
+        if ingreso_total > costo_total_vendido:
+            return "Se están generando ganancias"
+        elif ingreso_total == costo_total_vendido:
+            return "Se cubren únicamente las operaciones"
+        else:
+            return "Alerta operando debajo de las capacidades"
+
+
+
+# 2: MOTOR DE PERSISTENCIA LOCAL (JSON)
+
+ARCHIVODB = "inventario_emprendedor.json"
+
+def guardar_inventario(productos_dict):
+    """
+    JUSTIFICACIÓN RÚBRICA: Persistencia de datos (Escritura).
+    Serializa el estado actual de los objetos de la clase Producto y sus historiales, 
+    salvándolos en un archivo JSON plano para asegurar la persistencia.
+    """
+    datos = {}
+    for id_p, prod in productos_dict.items():
+        datos[id_p] = {
+            "nombre": prod.nombre,
+            "tipo": prod.tipo,
+            "historial_compras": prod.historial_compras,
+            "margen_deseado": prod.margen_deseado,
+            "promociones_cupones": prod.promociones_cupones,
+            "datos_competencia": prod.datos_competencia,
+            "costos_fijos": prod.costos_fijos
+        }
+    with open(ARCHIVODB, "w", encoding="utf-8") as f:
+        json.dump(datos, f, indent=4, ensure_ascii=False)
+
+def cargar_inventario(clase_producto):
+    """
+    JUSTIFICACIÓN RÚBRICA: Persistencia de datos y Carga Automática.
+    Al arrancar el programa, lee el archivo JSON (si existe) y reconstruye dinámicamente 
+    las instancias de POO, devolviendo los objetos con sus métodos y datos intactos.
+    """
+    if not os.path.exists(ARCHIVODB):
+        return {}  # Si es la primera ejecución, devuelve un diccionario vacío para inicializar.
+        
+    with open(ARCHIVODB, "r", encoding="utf-8") as f:
+        datos = json.load(f)
+        
+    productos_reconstruidos = {}
+    for id_p, info in datos.items():
+        prod = clase_producto(id_p, info["nombre"], info["tipo"])
+        prod.historial_compras = info["historial_compras"]
+        prod.margen_deseado = info["margen_deseado"]
+        prod.promociones_cupones = info["promociones_cupones"]
+        prod.datos_competencia = info["datos_competencia"]
+        prod.costos_fijos = info["costos_fijos"]
+        productos_reconstruidos[id_p] = prod
+        
+    return productos_reconstruidos
+
+
+
+
+# 3: INTERFAZ DE CONSOLA Y CONTROL DE PRUEBAS DE APERTURA
+
+def precargar_datos_cafeteria(inventario):
+    """
+    JUSTIFICACIÓN TÉCNICA: Realicé una precarga automatizada orientada para pruebas.
+    Si el sistema detecta que no hay un archivo JSON previo, inicializa el programa con el modelo 
+    financiero de la cafetería, configurando márgenes y guardando tus ventas piloto.
+    """
+    print("\n☕ [Sistema] Inicializando base de datos de la cafetería con datos de prueba de apertura...")
+    
+    
+    # PRODUCTO 1: COLD BREW (Modelo de Producto Fabricado con Receta)
+    coldbrew = Producto("PROD-CB01", "Cold Brew Especial", "Fabricado")
+    
+    # Prorrateo de Costos: Consumo de 250g de café del proveedor base ($120/kg -> $30.00 pesos).
+    # Se suman $15.00 de insumos adicionales prorrateados (agua, hielos, vaso, popote y opcionales).
+    # Costo de insumo por porción = $45.00. Costo de transporte/logística prorrateado = $5.00.
+    coldbrew.registrar_compra(costo_insumo=45.00, cantidad=100, costo_logistica=5.00)
+    
+    # Parámetros del Estratega: Margen deseado establecido exactamente en el 35% (0.35)
+    coldbrew.capturar_datos_margen(menudeo=0.35, mayoreo=0.20, promociones=0.0)
+    
+    # Benchmarking de la Colonia: Competidores locales ($60 y $75), Punta del Cielo ($95) y Starbucks ($85)
+    coldbrew.capturar_datos_competencia("Starbucks / Competencia Zona", "Misma Colonia", "2026-07-01", 85.00)
+    
+    # Registro de Estructura de Costos Fijos Mensuales del Negocio (Total: $71,400.00 MXN)
+    costos_cafeteria = [
+        ("Sueldo Barista", 20000),
+        ("Sueldo Emprendedor Fundador", 30000),
+        ("Renta del Local Comercial", 20000),
+        ("Servicio de Luz", 900),
+        ("Servicio de Internet", 500)
+    ]
+    for desc, cant in costos_cafeteria:
+        coldbrew.capturar_costo_fijo(desc, "Mensual", cant)
+    
+    # SIMULACIÓN DE APERTURA: Registro histórico de 30 Cold Brews vendidos a familiares y amigos.
+    # El precio cobrado corresponde al precio sugerido por el sistema con margen del 35%: $67.50.
+    # Esta llamada ejecuta internamente el algoritmo LIFO restando el stock de forma automática.
+    coldbrew.registrar_venta(cantidad_venta=30, precio_venta=67.50)
+    
+    inventario["PROD-CB01"] = coldbrew
+
+    
+    # PRODUCTO 2: BAGEL DE SALMÓN (Modelo de Producto Comercializado)
+
+    bagel = Producto("PROD-BG02", "Bagel de Salmón", "Comercializado")
+    
+    # Costo de adquisición directa con proveedor externo = $55.00 + $3.00 de logística de entrega.
+    bagel.registrar_compra(costo_insumo=55.00, cantidad=40, costo_logistica=3.00)
+    
+    # Parámetros del Estratega: Margen del 45% (Precio sugerido resultante: $84.10)
+    bagel.capturar_datos_margen(menudeo=0.45, mayoreo=0.25, promociones=0.0)
+    bagel.capturar_datos_competencia("Cafeterías Gourmet Locales", "Misma Colonia", "2026-07-01", 95.00)
+    
+    # Se le asocian los mismos costos fijos globales de la operación para el análisis individual de equilibrio
+    for desc, cant in costos_cafeteria:
+        bagel.capturar_costo_fijo(desc, "Mensual", cant)
+        
+    # SIMULACIÓN DE APERTURA: Registro histórico de 20 Bagels vendidos en las pruebas preliminares.
+    bagel.registrar_venta(cantidad_venta=20, precio_venta=84.10)
+    
+    inventario["PROD-BG02"] = bagel
+    
+    # Persistencia inmediata: Genera el archivo JSON para dejar el entorno listo para el usuario
+    guardar_inventario(inventario)
+    print("✅ ¡Entorno de pruebas inicializado! El sistema cuenta con historial de ventas y stock descargado.\n")
+
+
+def ejecutar_consola():
+    # JUSTIFICACIÓN RÚBRICA: Carga automática de datos al inicializar la ejecución.
+    inventario = cargar_inventario(Producto)
+    
+    # Si es la primera vez que el docente corre el programa, se inyectan los datos de la cafetería de forma transparente.
+    if not inventario:
+        precargar_datos_cafeteria(inventario)
+    
+    while True:
+        print("\n" + "="*55)
+        print(" ☕ SISTEMA DE INTELIGENCIA DE COSTOS - CAFETERÍA")
+        print("="*55)
+        print("1. [Generador] Registrar Nuevo Producto en Menú")
+        print("2. [Administrador] Registrar Entrada de Proveedor (LIFO)")
+        print("3. [Estratega] Configurar Parámetros y Costos Fijos")
+        print("4. [Estratega] Simular Escenarios de Precios y Equilibrio")
+        print("5. [Operador] Registrar Nueva Venta (Descarga LIFO)")
+        print("6. Mostrar Inventario de la Cafetería y Alertas")
+        print("7. Salir y Guardar Cambios")
+        print("="*55)
+        
+        opcion = input("Selecciona una opción del flujo: ")
+        
+        if opcion == "1":
+            print("\n--- GENERADOR DE PRODUCTO ---")
+            id_p = input("Ingresa código ID único (ej. PROD-03): ")
+            # JUSTIFICACIÓN RÚBRICA: Control de datos para impedir duplicación de IDs clave.
+            if id_p in inventario:
+                print("⚠️ Error: Este código ya está asignado a otro producto del menú.")
+                continue
+            nombre = input("Nombre del producto/bebida: ")
+            tipo = input("Tipo (1. Fabricado [Receta] / 2. Comercializado [Listo]): ")
+            tipo_str = "Fabricado" if tipo == "1" else "Comercializado"
+            
+            try:
+                inventario[id_p] = Producto(id_p, nombre, tipo_str)
+                print(f"✅ '{nombre}' añadido al menú con éxito.")
+            except ValueError as e:
+                print(f"⚠️ Error en validación de ID: {e}")
+                
+        elif opcion == "2":
+            print("\n--- ADMINISTRADOR: ENTRADAS DESDE PROVEEDOR ---")
+            id_p = input("Ingresa el ID del producto que reabastece: ")
+            if id_p not in inventario:
+                print("⚠️ Código de producto no registrado.")
+                continue
+                
+            print("\n💡 Precios de Referencia de Proveedores:")
+            print(" - El Descargue Estrella (Café): $120.00/kg (Costo por porción de 250g: $45.00)")
+            print(" - Mezcla Arábica Especial (Café): $160.00/kg (Costo por porción de 250g: $55.00)")
+            
+            try:
+                costo = float(input("\nIngresa el costo base calculado del lote ($): "))
+                cant = int(input("Cantidad de unidades que ingresan al stock: "))
+                logistica = float(input("Costo de Logística / Envío del lote ($): "))
+                
+                # Ejecuta la inserción en la lista dinámica (.append)
+                inventario[id_p].registrar_compra(costo, cant, logistica)
+                print("✅ Compra guardada. El costo unitario se recalculará bajo método LIFO.")
+            except ValueError:
+                print("⚠️ Entrada cancelada: Se requieren valores numéricos.")
+                
+        elif opcion == "4":
+            print("\n--- ESTRATEGA: ANÁLISIS DE PRECIOS Y VIABILIDAD DE OPERACIÓN ---")
+            id_p = input("Ingresa el ID del producto a analizar (PROD-CB01 o PROD-BG02): ")
+            if id_p not in inventario:
+                print("⚠️ Producto no encontrado.")
+                continue
+            
+            prod = inventario[id_p]
+            res = prod.calcular_precios_estrategicos()
+            
+            print(f"\n📈 DIAGNÓSTICO FINANCIERO: {prod.nombre.upper()}")
+            print(f" ├─ Costo de Última Compra Detectado (LIFO): ${prod.calcular_costo_unitario_lifo():.2f}")
+            print(f" ├─ Precio con Margen Sugerido:            ${res['precio_margen']:.2f}")
+            print(f" ├─ Precio Competidor Objetivo (Starbucks): ${res['precio_competitivo']:.2f}")
+            print(f" └─ Precio Estratégico Aplicado:            ${res['precio_estrategico']:.2f}")
+            print("-" * 55)
+            print(f"📊 ANÁLISIS DE ABSORCIÓN DE COSTOS FIJOS ($71,400.00 MXN):")
+            print(f" └─ Para que este producto cubra por sí solo la operación total de la cafetería,")
+            print(f"    requieres vender un volumen crítico de: {res['punto_equilibrio_unidades']:.1f} unidades/mes.")
+            
+        elif opcion == "5":
+            print("\n--- OPERADOR: PUNTO DE VENTA (SALIDAS) ---")
+            id_p = input("ID del producto vendido: ")
+            if id_p not in inventario:
+                print("⚠️ Producto no válido.")
+                continue
+            try:
+                cant_v = int(input("Cantidad de unidades ordenadas por el cliente: "))
+                prec_v = float(input("Precio final cobrado en caja ($): "))
+                
+                # Ejecuta la descarga algorítmica LIFO y recupera el estatus de rentabilidad
+                status_financiero = inventario[id_p].registrar_venta(cant_v, prec_v)
+                print(f"\n✅ Ticket de venta procesado con éxito.")
+                print(f" └─ Diagnóstico financiero de la venta: '{status_financiero}'")
+            except ValueError as e:
+                print(f"⚠️ Venta rechazada por el sistema: {e}")
+                
+        elif opcion == "6":
+            print("\n--- REPORTE CONTROL DE INVENTARIO Y ALERTAS ---")
+            for id_p, prod in inventario.items():
+                # JUSTIFICACIÓN RÚBRICA: Parámetros específicos para detonar alertas de stock.
+                alerta = prod.obtener_alerta_stock(limite_min=15, limite_max=80)
+                print(f"• [{id_p}] {prod.nombre:<22} | Stock Actual: {prod.stock_actual:<4} u. | Costo LIFO: ${prod.calcular_costo_unitario_lifo():.2f} | Estado: {alerta}")
+                
+        elif opcion == "7":
+            # JUSTIFICACIÓN RÚBRICA: Guardado forzoso en archivo JSON antes de cerrar.
+            guardar_inventario(inventario)
+            print("💾 Cambios respaldados exitosamente en 'inventario_emprendedor.json'.")
+            print("☕ ¡Estructura de datos salvada! Éxito en la revisión del proyecto final.")
+            break
+        else:
+            print("⚠️ Opción inválida del menú del flujo.")
+
+if __name__ == "__main__":
+    ejecutar_consola()
+    
+    
