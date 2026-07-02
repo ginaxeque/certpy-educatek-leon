@@ -393,7 +393,7 @@ def ejecutar_consola():
             # JUSTIFICACIÓN RÚBRICA: Guardado forzoso en archivo JSON antes de cerrar.
             guardar_inventario(inventario)
             print("💾 Cambios respaldados exitosamente en 'inventario_emprendedor.json'.")
-            print("☕ ¡Estructura de datos salvada! Éxito en la revisión del proyecto final.")
+            print("☕ ¡Estructura de datos salvada!")
             break
         else:
             print("⚠️ Opción inválida del menú del flujo.")
